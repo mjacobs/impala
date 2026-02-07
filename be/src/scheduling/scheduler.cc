@@ -1501,6 +1501,7 @@ void Scheduler::ComputeBackendExecParams(
     *backend.second.exec_params->mutable_backend_id() = be_desc.backend_id();
     *backend.second.exec_params->mutable_address() = be_desc.address();
     *backend.second.exec_params->mutable_krpc_address() = be_desc.krpc_address();
+    *backend.second.exec_params->mutable_machine_info() = be_desc.machine_info();
     if (!backend.second.exec_params->is_coord_backend()) {
       largest_min_reservation = max(largest_min_reservation,
           backend.second.exec_params->min_mem_reservation_bytes());

@@ -40,6 +40,7 @@
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/rpc/rpc_sidecar.h"
 #include "observe/otel.h"
+#include "runtime/backend-machine-info-aggregator.h"
 #include "runtime/coordinator-backend-state.h"
 #include "runtime/coordinator-filter-state.h"
 #include "runtime/debug-options.h"
@@ -1375,6 +1376,8 @@ void Coordinator::ComputeQuerySummary() {
 
   stringstream mem_info, cpu_user_info, cpu_system_info, bytes_read_info;
   ResourceUtilization total_utilization;
+  BackendMachineInfoAggregator machine_info_aggregator;
+
   for (BackendState* backend_state: backend_states_) {
     ResourceUtilization utilization = backend_state->GetResourceUtilization();
     total_utilization.Merge(utilization);
@@ -1390,6 +1393,10 @@ void Coordinator::ComputeQuerySummary() {
     cpu_system_info << network_address << "("
                     << PrettyPrinter::Print(utilization.cpu_sys_ns, TUnit::TIME_NS)
                     << ") ";
+
+    // Aggregate machine information.
+    DCHECK(backend_state->exec_params().has_machine_info());
+    machine_info_aggregator.Merge(backend_state->exec_params().machine_info());
   }
 
   // The definitions of these counters are in the top of this file.
@@ -1430,6 +1437,19 @@ void Coordinator::ComputeQuerySummary() {
   query_profile_->AddInfoString("Per Node Bytes Read", bytes_read_info.str());
   query_profile_->AddInfoString("Per Node User Time", cpu_user_info.str());
   query_profile_->AddInfoString("Per Node System Time", cpu_system_info.str());
+
+  // Add aggregated machine information
+  if (machine_info_aggregator.HasData()) {
+    string cpu_summary = machine_info_aggregator.GetCpuSummary();
+    if (!cpu_summary.empty()) {
+      query_profile_->AddInfoString("Backend CPU Info", cpu_summary);
+    }
+
+    string os_summary = machine_info_aggregator.GetOsSummary();
+    if (!os_summary.empty()) {
+      query_profile_->AddInfoString("Backend OS Info", os_summary);
+    }
+  }
 }
 
 string Coordinator::GetErrorLog() {

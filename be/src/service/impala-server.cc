@@ -81,8 +81,10 @@
 #include "util/auth-util.h"
 #include "util/coding-util.h"
 #include "util/common-metrics.h"
+#include "util/cpu-info.h"
 #include "util/debug-util.h"
 #include "util/error-util.h"
+#include "util/os-info.h"
 #include "util/histogram-metric.h"
 #include "util/impalad-metrics.h"
 #include "util/jwt-util.h"
@@ -2677,6 +2679,12 @@ void ImpalaServer::BuildLocalBackendDescriptorInternal(BackendDescriptorPB* be_d
   }
   be_desc->set_version(GetBuildVersion(/* compact */ true));
   be_desc->set_scheduling_seed(FLAGS_scheduling_seed);
+
+  // Add machine information for runtime profile
+  MachineInfoPB* machine_info = be_desc->mutable_machine_info();
+  machine_info->set_cpu_model_name(CpuInfo::model_name());
+  machine_info->set_cpu_num_cores(CpuInfo::num_cores());
+  machine_info->set_os_distribution(OsInfo::os_distribution());
 }
 
 void ImpalaServer::ConnectionStart(

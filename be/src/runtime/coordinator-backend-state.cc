@@ -31,6 +31,7 @@
 #include "kudu/util/status.h"
 #include "rpc/rpc-mgr.inline.h"
 #include "rpc/sidecar-util.h"
+#include "runtime/backend-machine-info-aggregator.h"
 #include "runtime/client-cache.h"
 #include "runtime/coordinator-filter-state.h"
 #include "runtime/debug-options.h"
@@ -89,6 +90,15 @@ void Coordinator::BackendState::Init(const vector<FragmentStats*>& fragment_stat
   host_profile_ =
       RuntimeProfile::Create(obj_pool, NetworkAddressPBToString(host_), false);
   host_profile_parent->AddChild(host_profile_);
+
+  // Add machine information to per-node profile.
+  DCHECK(backend_exec_params_.has_machine_info());
+  const MachineInfoPB& machine_info = backend_exec_params_.machine_info();
+  host_profile_->AddInfoString("OS Info",
+      BackendMachineInfoAggregator::MachineInfoPBToOsDisplayString(machine_info));
+  host_profile_->AddInfoString("CPU Info",
+      BackendMachineInfoAggregator::MachineInfoPBToCpuConfigString(machine_info));
+
   RuntimeProfile::Counter* admission_slots =
       ADD_COUNTER(host_profile_, "AdmissionSlots", TUnit::UNIT);
   admission_slots->Set(backend_exec_params_.slots_to_use());

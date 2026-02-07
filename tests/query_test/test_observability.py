@@ -1142,3 +1142,93 @@ class TestQueryStates(ImpalaTestSuite):
     """Returns true if the given 'line' is in the given 'profile'. A single line of the
     profile must exactly match the given 'line' (excluding whitespaces)."""
     return re.search(r"^\s*{0}\s*$".format(line), profile, re.M)
+
+  def test_backend_hardware_info_in_profile(self):
+    """Test for IMPALA-12191 - checks that backend hardware and OS information appears in
+    the runtime profile in both per-node profiles and aggregated summary."""
+    query = "select count(*) from functional.alltypes"
+    result = self.execute_query(query)
+    profile = result.runtime_profile
+
+    # Check that Backend CPU Info is present in aggregated summary
+    assert "Backend CPU Info:" in profile, \
+        "Backend CPU Info not found in profile:\n" + profile
+
+    # Check that Backend OS Info is present in aggregated summary
+    assert "Backend OS Info:" in profile, \
+        "Backend OS Info not found in profile:\n" + profile
+
+    # Extract and validate the aggregated CPU info line
+    cpu_info_match = re.search(r'Backend CPU Info:\s+(.+)', profile)
+    assert cpu_info_match is not None, \
+        "Could not extract Backend CPU Info from profile:\n" + profile
+    cpu_info = cpu_info_match.group(1)
+
+    # Validate format: Should contain "cores" and a count in parentheses
+    # Example: "Intel(R) Xeon(R) Silver 4215R CPU @ 3.20GHz (32 cores) (3)"
+    # Or with multiple configs: "CPU1 (28 cores) (15), CPU2 (20 cores) (3)"
+    assert "cores" in cpu_info.lower(), \
+        "Backend CPU Info should contain core count: {0}\nFull profile:\n{1}".format(
+            cpu_info, profile)
+    assert re.search(r'\(\d+\)$', cpu_info), \
+        "Backend CPU Info should end with node count in parentheses, got: {0}\n" \
+        "Full profile:\n{1}".format(cpu_info, profile)
+
+    # Extract and validate the aggregated OS info line
+    os_info_match = re.search(r'Backend OS Info:\s+(.+)', profile)
+    assert os_info_match is not None, \
+        "Could not extract Backend OS Info from profile:\n" + profile
+    os_info = os_info_match.group(1)
+
+    # Validate format: Should contain an OS name and a count in parentheses
+    # Example: "Ubuntu 22.04.5 LTS (3)"
+    # Or with multiple configs: "CentOS Linux 7 (15), Ubuntu 20.04.3 LTS (3)"
+    assert re.search(r'\(\d+\)$', os_info), \
+        "Backend OS Info should end with node count in parentheses, got: {0}\n" \
+        "Full profile:\n{1}".format(os_info, profile)
+
+    # Check that CPU and OS info appear in per-node profiles
+    assert "Per Node Profiles:" in profile, \
+        "Per Node Profiles section not found in profile:\n" + profile
+
+    # Verify that at least one per-node profile has CPU Info and OS Info
+    # Extract the Per Node Profiles section
+    per_node_match = re.search(r'Per Node Profiles:(.*?)(?=\n\s{0,2}\w|\Z)',
+                                profile, re.DOTALL)
+    assert per_node_match is not None, \
+        "Could not extract Per Node Profiles section from profile:\n" + profile
+    per_node_section = per_node_match.group(1)
+
+    # Check for CPU Info and OS Info in per-node profiles
+    assert "CPU Info:" in per_node_section, \
+        "CPU Info not found in Per Node Profiles section:\n{0}\n" \
+        "Full profile:\n{1}".format(per_node_section, profile)
+    assert "OS Info:" in per_node_section, \
+        "OS Info not found in Per Node Profiles section:\n{0}\n" \
+        "Full profile:\n{1}".format(per_node_section, profile)
+
+    # Validate the aggregation format supports multiple configurations
+    # The format is: "<config1> (<count1>), <config2> (<count2>), ..."
+    # Example heterogeneous: "Intel Xeon E5-2680 (28 cores) (15),
+    #                         Intel Xeon E5-2660 (20 cores) (3)"
+    # Example homogeneous: "Intel Xeon Silver 4215R (32 cores) (3)"
+
+    # Verify node counts are positive integers
+    cpu_node_counts = re.findall(r'\)\s*\((\d+)\)', cpu_info)
+    assert len(cpu_node_counts) > 0, \
+        "Backend CPU Info should contain at least one node count, got: {0}\n" \
+        "Full profile:\n{1}".format(cpu_info, profile)
+    for count_str in cpu_node_counts:
+      assert int(count_str) > 0, \
+          "Node count should be positive, got {0} in: {1}\nFull profile:\n{2}".format(
+              count_str, cpu_info, profile)
+
+    # Verify OS info node counts are positive integers
+    os_node_counts = re.findall(r'\((\d+)\)', os_info)
+    assert len(os_node_counts) > 0, \
+        "Backend OS Info should contain at least one node count, got: {0}\n" \
+        "Full profile:\n{1}".format(os_info, profile)
+    for count_str in os_node_counts:
+      assert int(count_str) > 0, \
+          "Node count should be positive, got {0} in: {1}\nFull profile:\n{2}".format(
+              count_str, os_info, profile)
