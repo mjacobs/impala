@@ -118,6 +118,7 @@ public class IcebergContentFileStore {
     // Return true if 'desc' was a new entry.
     public boolean add(Hash128 pathHash, EncodedFileDescriptor desc) {
       if (fileDescMap_.put(pathHash, desc) == null) {
+        clearCachedObjects();
         fileDescList_.add(desc);
         return true;
       }
@@ -135,6 +136,12 @@ public class IcebergContentFileStore {
 
     List<IcebergFileDescriptor> getList() {
       return Lists.transform(fileDescList_, fd -> IcebergContentFileStore.decode(fd));
+    }
+
+    // Clear cached objects that are derived from the map and list, to ensure they will be
+    // rebuilt on next access with the most up-to-date data after mutations.
+    void clearCachedObjects() {
+      reverseMap_ = null;
     }
 
     // It's enough to only convert the map part to thrift.
@@ -199,6 +206,9 @@ public class IcebergContentFileStore {
 
   /////////////////////////////////////////
   // BEGIN: immutable members
+  // Note that mergeWithNewFiles() actually mutates these fields by adding new
+  // files, but mergeWithNewFiles() is only used in catalogd while cloneWithoutMutables
+  // is used in coordinators.
 
   // Separate map-list containers for the different content files.
   private MapListContainer dataFilesWithoutDeletes_ = new MapListContainer();
@@ -286,6 +296,41 @@ public class IcebergContentFileStore {
     ret.hasOrc_ = hasOrc_;
     ret.hasParquet_ = hasParquet_;
     return ret;
+  }
+
+  /**
+   * Merges the newly loaded files from 'newIcebergFiles' into this file store.
+   * The file descriptors for the new files are taken from 'newFds'.
+   * 'mergedPartitions' must be the complete partition map (existing + new) as returned
+   * by IcebergFileMetadataLoader.getIcebergPartitions() when the loader was created
+   * with the incremental constructor.
+   *
+   * This method is intended for append-only incremental reloads. The 'newIcebergFiles'
+   * object is only referenced during this call and can be discarded by the caller
+   * afterwards.
+   */
+  public void mergeWithNewFiles(
+      GroupedContentFiles newIcebergFiles,
+      List<IcebergFileDescriptor> newFds,
+      Map<TIcebergPartition, Integer> mergedPartitions,
+      String apiTableLocation) {
+    Preconditions.checkState(newIcebergFiles.dataFilesWithDeletes.isEmpty()
+        && newIcebergFiles.positionDeleteFiles.isEmpty()
+        && newIcebergFiles.equalityDeleteFiles.isEmpty()
+        && newIcebergFiles.dataFileToDV.isEmpty(),
+        "mergeWithNewFiles only supports append-only changes (dataFilesWithoutDeletes)");
+
+    Map<String, IcebergFileDescriptor> newFdMap = new HashMap<>();
+    for (IcebergFileDescriptor fd : newFds) {
+      String absPathStr = fd.getAbsolutePath(apiTableLocation);
+      String pathStr = quickGetPath(absPathStr);
+      newFdMap.put(pathStr, fd);
+    }
+
+    for (DataFile dataFile : newIcebergFiles.dataFilesWithoutDeletes) {
+      storeFile(dataFile, newFdMap, dataFilesWithoutDeletes_);
+    }
+    partitions_ = mergedPartitions;
   }
 
   private void storeFile(ContentFile<?> contentFile,

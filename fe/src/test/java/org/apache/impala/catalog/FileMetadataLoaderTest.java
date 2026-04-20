@@ -373,7 +373,8 @@ public class FileMetadataLoaderTest {
     GroupedContentFiles iceFiles = IcebergUtil.getIcebergFiles(iceT,
         /*predicates=*/Collections.emptyList(), /*timeTravelSpec=*/null);
     return new IcebergFileMetadataLoader(iceT.getIcebergApiTable(),
-        oldFds, hostIndex, iceFiles, oldPartitions, requiresDataFilesInTableLocation);
+        oldFds, hostIndex, iceFiles, oldPartitions,
+        requiresDataFilesInTableLocation, null);
   }
 
   private FileMetadataLoader getLoaderForAcidTable(

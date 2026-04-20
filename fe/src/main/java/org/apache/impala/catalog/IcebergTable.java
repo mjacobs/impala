@@ -256,6 +256,21 @@ public class IcebergTable extends Table implements FeIcebergTable {
   // The snapshot id cached in the CatalogD, necessary to syncronize the caches.
   private long catalogSnapshotId_ = -1;
 
+  // The snapshot id of the last successfully loaded IcebergContentFileStore.
+  // -1 until the table has been loaded at least once.
+  private long loadedSnapshotId_ = -1;
+
+  // The firstRowId of the last successfully loaded snapshot. Used to detect the
+  // first new snapshot written after an upgrade to Iceberg v3: when the loaded snapshot
+  // had no firstRowId (-1) but the new one does, existing data files lack row IDs so
+  // a full file metadata reload is required.
+  private long loadedFirstRowId_ = -1;
+
+  // The Iceberg format version (1, 2, or 3) of the last successfully loaded snapshot.
+  // Cached here to detect version changes across reloads; a format version change forces
+  // a full file metadata reload.
+  private int loadedFormatVersion_ = -1;
+
   private Map<Integer, IcebergColumn> icebergFieldIdToCol_;
   private Map<String, TIcebergPartitionStats> partitionStats_;
 
@@ -515,23 +530,21 @@ public class IcebergTable extends Table implements FeIcebergTable {
 
   /**
    * Reloads file metadata, unless reuseMetadata is true and metadata.json file hasn't
-   * changed.
+   * changed, or the Iceberg snapshot hasn't changed since the previous load.
    */
   private void loadFileMetadata(boolean reuseMetadata, IMetaStoreClient msClient,
       String reason, EventSequence catalogTimeline) throws IcebergTableLoadingException {
-    if (reuseMetadata && canSkipReload()) {
+    if (reuseMetadata && canSkipDataReload()) {
       catalogTimeline.markEvent(
           "Iceberg table reload skipped as no change detected");
       return;
     }
     final Timer.Context ctxStorageLdTime =
         getMetrics().getTimer(Table.LOAD_DURATION_STORAGE_METADATA).time();
+    boolean incremental = false;
     try {
       currentMetadataLocation_ =
           ((BaseTable)icebergApiTable_).operations().current().metadataFileLocation();
-      GroupedContentFiles icebergFiles = IcebergUtil.getIcebergFiles(this,
-          new ArrayList<>(), /*timeTravelSpec=*/null);
-      catalogTimeline.markEvent("Loaded Iceberg content file list");
       // We use IcebergFileMetadataLoader directly to load file metadata, so we don't
       // want 'hdfsTable_' to do any file loading.
       hdfsTable_.setSkipIcebergFileMetadataLoading(true);
@@ -539,37 +552,109 @@ public class IcebergTable extends Table implements FeIcebergTable {
       // create an external Iceberg table, we have no column information in the SQL
       // statement.
       hdfsTable_.load(reuseMetadata, msClient, msTable_, reason, catalogTimeline);
+
+      incremental = canDoIncrementalLoad();
+
+      GroupedContentFiles icebergFiles = incremental
+          ? IcebergUtil.getNewIcebergFilesBetweenSnapshots(
+                icebergApiTable_, loadedSnapshotId_, catalogSnapshotId_)
+          : IcebergUtil.getIcebergFiles(
+                this, Collections.emptyList(), /*timeTravelSpec=*/null);
+      catalogTimeline.markEvent(
+          incremental ? "Loaded Iceberg content file list incrementally"
+                      : "Loaded Iceberg content file list");
+
+      // Don't pass olfFds in incremental case as all files should be new.
+      Iterable<IcebergFileDescriptor> oldFds = (fileStore_ == null || incremental)
+          ? Collections.emptyList() : fileStore_.getAllFiles();
+
       IcebergFileMetadataLoader loader = new IcebergFileMetadataLoader(
           icebergApiTable_,
-          fileStore_ == null ? Collections.emptyList() : fileStore_.getAllFiles(),
-          getHostIndex(), Preconditions.checkNotNull(icebergFiles),
+          oldFds,
+          getHostIndex(),
+          Preconditions.checkNotNull(icebergFiles),
           fileStore_ == null ? Collections.emptyList() : fileStore_.getPartitionList(),
-          Utils.requiresDataFilesInTableLocation(this));
+          Utils.requiresDataFilesInTableLocation(this),
+          incremental ? fileStore_.getPartitionMap() : null);
       loader.load();
-      catalogTimeline.markEvent("Loaded Iceberg file descriptors");
-      fileStore_ = new IcebergContentFileStore(icebergApiTable_,
-          loader.getLoadedIcebergFds(), icebergFiles, loader.getIcebergPartitions());
-      partitionStats_ = Utils.loadPartitionStats(this.getIcebergApiTable(), icebergFiles);
+      catalogTimeline.markEvent(
+          incremental ? "Loaded Iceberg file descriptors incrementally"
+                      : "Loaded Iceberg file descriptors");
 
+      if (incremental) {
+        fileStore_.mergeWithNewFiles(icebergFiles,
+            loader.getLoadedIcebergFds(), loader.getIcebergPartitions(),
+            icebergApiTable_.location());
+        FileMetadataStats totalStats = new FileMetadataStats();
+        totalStats.set(fileMetadataStats_);
+        totalStats.merge(loader.getFileMetadataStats());
+        updateMetrics(totalStats);
+      } else {
+        fileStore_ = new IcebergContentFileStore(icebergApiTable_,
+            loader.getLoadedIcebergFds(), icebergFiles, loader.getIcebergPartitions());
+        updateMetrics(loader.getFileMetadataStats());
+      }
+      partitionStats_ = Utils.loadPartitionStats(
+          icebergApiTable_, icebergFiles, incremental ? partitionStats_ : null);
       setAvroSchema(msClient, msTable_, fileStore_, catalogTimeline);
-      updateMetrics(loader.getFileMetadataStats());
+      updateLoadedState();
     } catch (Exception e) {
       throw new IcebergTableLoadingException("Error loading metadata for Iceberg table "
           + icebergTableLocation_, e);
     } finally {
       storageMetadataLoadTime_ = ctxStorageLdTime.stop();
     }
-    LOG.info("Loaded file and block metadata for {}. Time taken: {}",
-        getFullName(), PrintUtils.printTimeNs(storageMetadataLoadTime_));
+    LOG.info("Loaded file and block metadata for {}{}. Time taken: {}",
+        getFullName(), incremental ? " incrementally" : "",
+        PrintUtils.printTimeNs(storageMetadataLoadTime_));
   }
 
-  private boolean canSkipReload() {
+  // Returns true if file metadata can be loaded incrementally: we have a previously
+  // loaded snapshot to build on and all intervening operations are appends. A format
+  // version change also blocks incremental loading as a conservative measure, even though
+  // it is not really necessary. Also guards against the first new snapshot after an
+  // Iceberg v3 upgrade, where existing data files lack row IDs (detected by
+  // loadedFirstRowId_ == -1 while the new snapshot already has a firstRowId).
+  private boolean canDoIncrementalLoad() {
+    if (loadedSnapshotId_ == -1
+        || catalogSnapshotId_ == loadedSnapshotId_
+        || fileStore_ == null) {
+      return false;
+    }
+    if (getFormatVersion() != loadedFormatVersion_) return false;
+    Snapshot currentSnapshot = catalogSnapshotId_ == -1
+        ? null : icebergApiTable_.snapshot(catalogSnapshotId_);
+    Long currentFirstRowId = currentSnapshot != null
+        ? currentSnapshot.firstRowId() : null;
+    if (loadedFirstRowId_ == -1 && currentFirstRowId != null) return false;
+    return IcebergUtil.onlyAppendsBetweenSnapshots(
+        icebergApiTable_, loadedSnapshotId_, catalogSnapshotId_);
+  }
+
+  private void updateLoadedState() {
+    loadedSnapshotId_ = catalogSnapshotId_;
+    Snapshot loadedSnapshot = catalogSnapshotId_ == -1
+        ? null : icebergApiTable_.snapshot(catalogSnapshotId_);
+    Long loadedFirstRowId = loadedSnapshot != null ? loadedSnapshot.firstRowId() : null;
+    loadedFirstRowId_ = loadedFirstRowId != null ? loadedFirstRowId : -1;
+    loadedFormatVersion_ = getFormatVersion();
+  }
+
+  private boolean canSkipDataReload() {
     if (icebergApiTable_ == null) return false;
     Preconditions.checkState(icebergApiTable_ instanceof BaseTable);
     BaseTable newTable = (BaseTable) icebergApiTable_;
-    return Objects.equals(
+    if (Objects.equals(
         currentMetadataLocation_,
-        newTable.operations().current().metadataFileLocation());
+        newTable.operations().current().metadataFileLocation())) {
+      return true;
+    }
+    if (loadedSnapshotId_ != -1
+        && loadedSnapshotId_ == catalogSnapshotId_
+        && fileStore_ != null) {
+      return true;
+    }
+    return false;
   }
 
   private void updateMetrics(FileMetadataStats stats) {

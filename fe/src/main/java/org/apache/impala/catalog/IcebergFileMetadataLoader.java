@@ -80,11 +80,21 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
   // Map of the freshly loaded Iceberg partitions and their corresponding ids.
   private ConcurrentHashMap<TIcebergPartition, Integer> loadedIcebergPartitions_;
   private final boolean requiresDataFilesInTableLocation_;
+  // When non-null, these partitions are pre-loaded into loadedIcebergPartitions_ at the
+  // start of loadInternal(). Used for incremental file loading to assign new partition
+  // IDs that do not conflict with already-existing ones.
+  private final Map<TIcebergPartition, Integer> initialPartitions_;
 
+  /**
+   * 'existingPartitions', when non-null, is pre-loaded into the partition map so that
+   * new partitions receive IDs that do not conflict with existing ones (used for
+   * incremental file loading). Pass null for a full load.
+   */
   public IcebergFileMetadataLoader(org.apache.iceberg.Table iceTbl,
         Iterable<IcebergFileDescriptor> oldFds, ListMap<TNetworkAddress> hostIndex,
         GroupedContentFiles icebergFiles, List<TIcebergPartition> partitions,
-        boolean requiresDataFilesInTableLocation) {
+        boolean requiresDataFilesInTableLocation,
+        Map<TIcebergPartition, Integer> existingPartitions) {
     super(iceTbl.location(), true, oldFds, hostIndex, null, null,
         HdfsFileFormat.ICEBERG);
     iceTbl_ = iceTbl;
@@ -93,6 +103,7 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
     icebergFiles_ = icebergFiles;
     oldIcebergPartitions_ = partitions;
     requiresDataFilesInTableLocation_ = requiresDataFilesInTableLocation;
+    initialPartitions_ = existingPartitions;
   }
 
   @Override
@@ -126,6 +137,11 @@ public class IcebergFileMetadataLoader extends FileMetadataLoader {
   private void loadInternal() throws CatalogException, IOException {
     loadedFds_ = new ArrayList<>();
     loadedIcebergPartitions_ = new ConcurrentHashMap<>();
+    if (initialPartitions_ != null) {
+      loadedIcebergPartitions_.putAll(initialPartitions_);
+      int nextId = initialPartitions_.size();
+      nextPartitionId_.set(nextId);
+    }
     loadStats_ = new LoadStats(partDir_);
     fileMetadataStats_ = new FileMetadataStats();
 

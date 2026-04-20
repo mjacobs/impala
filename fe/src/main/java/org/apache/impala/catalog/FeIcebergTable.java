@@ -1011,10 +1011,16 @@ public interface FeIcebergTable extends FeFsTable {
      * the metadata files the result set is limited to the files that are tracked by
      * Iceberg. Both the number of rows and number of files show in partitionStats.
      * TODO(IMPALA-11516): Return better partition stats for V2 tables.
+     *
+     * If 'existing' is non-null the stats from 'icebergFiles' are merged into a copy of
+     * that map. This is used during incremental file loading to avoid recomputing stats
+     * from scratch.
      */
     public static Map<String, TIcebergPartitionStats> loadPartitionStats(
-        Table apiTable, GroupedContentFiles icebergFiles) {
-      Map<String, TIcebergPartitionStats> nameToStats = new HashMap<>();
+        Table apiTable, GroupedContentFiles icebergFiles,
+        @Nullable Map<String, TIcebergPartitionStats> existing) {
+      Map<String, TIcebergPartitionStats> nameToStats =
+          existing != null ? new HashMap<>(existing) : new HashMap<>();
       for (ContentFile<?> contentFile : icebergFiles.getAllContentFiles()) {
         String name = getPartitionKey(apiTable, contentFile);
         nameToStats.put(name, mergePartitionStats(nameToStats, contentFile, name));

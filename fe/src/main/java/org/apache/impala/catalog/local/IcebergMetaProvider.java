@@ -592,13 +592,13 @@ public class IcebergMetaProvider implements MetaProvider {
       GroupedContentFiles groupedFiles = new GroupedContentFiles(scan.planFiles());
       IcebergFileMetadataLoader iceFml = new IcebergFileMetadataLoader(
           apiTable, Collections.emptyList(), hostIndex, groupedFiles,
-          Collections.emptyList(), false);
+          Collections.emptyList(), false, null);
       iceFml.load();
       IcebergContentFileStore contentFileStore = new IcebergContentFileStore(apiTable,
           iceFml.getLoadedIcebergFds(), groupedFiles, iceFml.getIcebergPartitions());
       Map<String, TIcebergPartitionStats> partStats = null;
       if (loadPartStats) {
-        partStats = FeIcebergTable.Utils.loadPartitionStats(apiTable, groupedFiles);
+        partStats = FeIcebergTable.Utils.loadPartitionStats(apiTable, groupedFiles, null);
       }
       return new MetaProvider.CachedIcebergFiles(contentFileStore, hostIndex, partStats);
     } catch (Exception e) {

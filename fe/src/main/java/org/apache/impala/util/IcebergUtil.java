@@ -45,12 +45,17 @@ import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.iceberg.AddedRowsScanTask;
 import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.ChangelogScanTask;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataOperations;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -736,6 +741,46 @@ public class IcebergUtil {
   private static TableScan newScan(FeIcebergTable table) {
     TableScan scan = table.getIcebergApiTable().newScan();
     return scan.caseSensitive(false);
+  }
+
+  /**
+   * Returns true if every snapshot in the range (fromSnapshotId, toSnapshotId] is an
+   * append-only operation. Returns false if any snapshot in the range is not an append,
+   * or if the snapshot chain is broken before reaching 'fromSnapshotId'.
+   */
+  public static boolean onlyAppendsBetweenSnapshots(Table icebergApiTable,
+      long fromSnapshotId, long toSnapshotId) {
+    Snapshot current = icebergApiTable.snapshot(toSnapshotId);
+    while (current != null && current.snapshotId() != fromSnapshotId) {
+      if (!DataOperations.APPEND.equals(current.operation())) return false;
+      Long parentId = current.parentId();
+      if (parentId == null) return false;
+      current = icebergApiTable.snapshot(parentId);
+    }
+    return current != null && current.snapshotId() == fromSnapshotId;
+  }
+
+  /**
+   * Returns a GroupedContentFiles containing only the data files added in the snapshot
+   * range (fromSnapshotId, toSnapshotId]. The caller must ensure that all operations in
+   * that range are append-only.
+   */
+  public static GroupedContentFiles getNewIcebergFilesBetweenSnapshots(
+      Table icebergApiTable, long fromSnapshotId, long toSnapshotId)
+      throws TableLoadingException {
+    IncrementalAppendScan scan = icebergApiTable.newIncrementalAppendScan()
+        .fromSnapshotExclusive(fromSnapshotId)
+        .toSnapshot(toSnapshotId);
+    GroupedContentFiles result = new GroupedContentFiles();
+    try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {
+      for (FileScanTask task : tasks) {
+        result.dataFilesWithoutDeletes.add(task.file());
+      }
+    } catch (IOException e) {
+      throw new TableLoadingException(
+          "Error during reading incremental Iceberg manifest files.", e);
+    }
+    return result;
   }
 
   /**
