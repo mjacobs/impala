@@ -21,7 +21,7 @@
 # 22.04 and 24.04. To run it you need to have:
 #
 # 1. At least 8GB of free disk space
-# 4. A connection to the internet (parts of the build download dependencies)
+# 2. A connection to the internet (parts of the build download dependencies)
 #
 # To bootstrap a more complete development environment that includes not only building
 # Impala but also running and testing it, see bootstrap_development.sh in this directory.
@@ -36,7 +36,8 @@ sudo -E apt-get --quiet update
 # Always install Python 3 and set it to be the default Python
 PACKAGES='g++ gcc git libsasl2-dev libssl-dev make ninja-build
      python3-dev python3-setuptools python3-venv libffi-dev language-pack-en
-     libkrb5-dev krb5-admin-server krb5-kdc krb5-user libxml2-dev libxslt-dev wget'
+     libkrb5-dev krb5-admin-server krb5-kdc krb5-user libxml2-dev libxslt-dev wget
+     vim-common'
 
 sudo -E apt-get --yes --quiet install ${PACKAGES}
 
@@ -57,7 +58,7 @@ if [ ! -d "/usr/local/apache-maven-${MVN_VERSION}" ]; then
     "https://${IMPALA_TOOLCHAIN_HOST}/maven/apache-maven-${MVN_VERSION}-bin.tar.gz"
   sha512sum -c - <<< "33d81e0ec785f0207e3e5e3ffb61863e1dca5784c15ac3fb5ff105f69cffbea484eb8d473ea60467a63f7b0570eef8622f2fed8eee96acbe668aa313391cddb3 apache-maven-${MVN_VERSION}-bin.tar.gz"
   sudo tar -C /usr/local -xzf apache-maven-${MVN_VERSION}-bin.tar.gz
-  sudo ln -s /usr/local/apache-maven-${MVN_VERSION}/bin/mvn /usr/local/bin
+  sudo ln -s -f /usr/local/apache-maven-${MVN_VERSION}/bin/mvn /usr/local/bin
 fi
 
 # Optionally try to prepopulate the m2 directory to save time. Since Maven has
@@ -71,4 +72,4 @@ else
   echo ">>> Skip populating m2 directory"
 fi
 
-./buildall.sh -notests -so
+./buildall.sh -notests -noclean
